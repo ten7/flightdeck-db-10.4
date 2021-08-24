@@ -28,4 +28,4 @@ USER mysql
 
 # Set the entrypoint and default command.
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["mysqld_safe", "--user=mysql", "--console"]
+CMD ["docker-cmd.sh", "mysqld_safe", "--user=mysql", "--console"]

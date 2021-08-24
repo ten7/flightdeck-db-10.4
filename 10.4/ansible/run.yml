@@ -1,171 +1,69 @@
 ---
 - hosts: mysql
   tasks:
-    - name: Determine if MySQL has be initialized
-      stat:
-        path: "/var/lib/mysql/mysql"
-      register: _mysql_data_dir
-
-    # We force the root user auth method to "normal" as older versions of
-    # mariadb relied on it, and it causes issues for our init script.
-    - name: Run MySQL initialization script
-      shell: >
-        mysql_install_db
-        --user=mysql
-        --datadir=/var/lib/mysql
-        --skip-test-db
-        --auth-root-authentication-method=normal
-      when:
-        - _mysql_data_dir.stat.exists == false
-
-    - name: Ensure the MySQL conf directory exists.
-      file:
-        path: "/etc/my.cnf.d"
+    - name: Create a temp directory
+      tempfile:
         state: directory
-        owner: "mysql"
-        group: "mysql"
-        mode: "u=rwx,g=rwx,o="
+        prefix: "docker-cmd-"
+      register: _cmd_temp_dir
+      notify:
+        - delete temp items
 
-    - name: Configure MySQL globally.
-      template:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        owner: "mysql"
-        group: "mysql"
-        mode: "u=r,g=r,o="
-      loop:
-        - src: "templates/my.cnf.d/flight-deck.cnf.j2"
-          dest: "/etc/my.cnf.d/flight-deck.cnf"
-        - src: "templates/my.cnf.d/mariadb-server.cnf.j2"
-          dest: "/etc/my.cnf.d/mariadb-server.cnf"
-
-    - name: Start MySQL in the background
-      block:
-        - name: Run mysqld_safe
-          shell: >
-            mysqld_safe --user=mysql --console
-          async: 600
-          poll: 0
-          notify:
-            - stop background mysql
-        - name: Wait for startup to complete
-          shell: >
-            mysqladmin ping
-          register: _mysql_ping
-          until: _mysql_ping.rc == 0
-          retries: 30
-          delay: 1
-
-    # The .my.cnf file only exists after database initialization, so we need
-    # to create a variable only if it exists. That way, we can use default(omit)
-    # everywhere to fallback to passwordless use on first startup.
-    - name: Check if .my.cnf exists
-      stat:
-        path: "/var/lib/mysql/.my.cnf"
-      register: _mycnf
-    - name: Set a flag if the file exists
-      set_fact:
-        _conf_file_path: "/var/lib/mysql/.my.cnf"
+    - name: Download DB dumps from S3
+      aws_s3:
+        bucket: "{{ item.clone.bucket }}"
+        object: "{{ item.clone.path }}"
+        dest: "{{ _cmd_temp_dir.path }}/{{ item.name }}.sqldump"
+        mode: get
+        s3_url: "{{ item.clone.endpoint | default(omit) }}"
+        region: "{{ item.clone.region | default(omit) }}"
+        aws_access_key: "\
+          {% if item.accessKeyFile is defined %}\
+          {{ lookup('file', item.clone.accessKeyFile) }}\
+          {% else %}\
+          {{ item.clone.accessKey | default(omit) }}\
+          {% endif %}"
+        aws_secret_key: "\
+          {% if item.secretKeyFile is defined %}\
+          {{ lookup('file', item.clone.secretKeyFile) }}\
+          {% else %}\
+          {{ item.clone.secretKey | default(omit) }}\
+          {% endif %}"
+      loop: "{{ mysql_databases | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: "{{ flightdeck_debug | default(false) | ternary(false, true) }}"
       when:
-        - _mycnf.stat.exists
+        - item.clone is defined
+        - (item.clone.method | default('none')) == 's3'
 
-    - name: Ensure MySQL users are present.
-      mysql_user:
-        name: "{{ item.name }}"
-        host: "{{ item.host | default('localhost') }}"
-        password: "\
-          {% if item.passwordFile is defined %}\
-          {{ lookup('file', item.passwordFile, errors='strict') }}\
-          {% else %}\
-          {{ item.password | default(omit) }}\
-          {% endif %}"
-        priv: "{{ item.priv | default('*.*:USAGE') }}"
-        state: "{{ item.state | default('present') }}"
-        append_privs: "{{ item.append_privs | default('no') }}"
-        encrypted: "{{ item.encrypted | default('no') }}"
-        login_user: "root"
-        login_unix_socket: "/var/run/mysqld/mysqld.sock"
-        config_file: "{{ _conf_file_path | default(omit) }}"
-      with_items: "{{ mysql_users }}"
+    - name: Import DB dumps
+      shell: >
+        {% if _compression == 'gz' %}
+        zcat {{ _archive }} | mysql -C {{ item.name }}
+        {% elif _compression  == 'lz' %}
+        lzcat {{ _archive }} | mysql -C {{ item.name }}
+        {% elif _compression  == 'lzop' %}
+        lzopcat {{ _archive }} | mysql -C {{ item.name }}
+        {% else %}
+        mysql -C {{ item.name }} < {{ _archive }}
+        {% endif %}
+      args:
+        chdir: "{{ _cmd_temp_dir.path }}"
+      loop: "{{ mysql_databases | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        _compression: "{{ item.clone.compression | default('none') }}"
+        _archive: "{{ _cmd_temp_dir.path }}/{{ item.name }}.sqldump"
       no_log: "{{ flightdeck_debug | default(false) | ternary(false, true) }}"
-
-    - name: Ensure MySQL databases are present.
-      mysql_db:
-        name: "{{ item.name }}"
-        collation: "{{ item.collation | default('utf8_general_ci') }}"
-        encoding: "{{ item.encoding | default('utf8') }}"
-        state: "{{ item.state | default('present') }}"
-        login_user: "root"
-        login_unix_socket: "/var/run/mysqld/mysqld.sock"
-        config_file: "{{ _conf_file_path | default(omit) }}"
-      with_items: "{{ mysql_databases }}"
-
-    - name: Get the root password.
-      set_fact:
-        _root_password: "\
-          {% if mysql_root_password_file is defined %}\
-          {{ lookup('file', mysql_root_password_file, errors='strict') }}\
-          {% else %}\
-          {{ mysql_root_password }}\
-          {% endif %}"
-      no_log: "{{ flightdeck_debug | default(false) | ternary(false, true) }}"
-
-    - name: Update the root password for all hosts.
-      mysql_user:
-        name: "root"
-        host_all: yes
-        password: "{{ _root_password }}"
-        login_user: "root"
-        login_unix_socket: "/var/run/mysqld/mysqld.sock"
-        config_file: "{{ _conf_file_path | default(omit) }}"
-      no_log: "{{ flightdeck_debug | default(false) | ternary(false, true) }}"
-
-    # Create the .my.cnf file in the volume, *and* the home directory.
-    # That way, users exec-ing in don't need to specify a login.
-    - name: Create .my.cnf
-      copy:
-        dest: "{{ item }}"
-        content: |
-          [client]
-          user = "root"
-          password = "{{ _root_password }}"
-        owner: "mysql"
-        group: "mysql"
-        mode: "u=rw,g=rw,o="
-      loop:
-        - "/home/mysql/.my.cnf"
-        - "/var/lib/mysql/.my.cnf"
-
-    # This task will only use the config file we just created.
-    - name: Configure remote root account.
-      mysql_user:
-        name: "root"
-        host: "%"
-        password: "{{ _root_password }}"
-        state: "{{ mysql_allow_remote_root | ternary('present', 'absent') }}"
-        priv: "*.*:ALL"
-        login_unix_socket: "/var/run/mysqld/mysqld.sock"
-        config_file: "/var/lib/mysql/.my.cnf"
-      no_log: "{{ flightdeck_debug | default(false) | ternary(false, true) }}"
-
-    # Running this after deletes any anon users, created intentionally or not.
-    - name: Drop anonymous users.
-      mysql_user:
-        name: ""
-        host_all: yes
-        state: absent
-        login_user: "root"
-        login_password: "{{ _root_password }}"
-        login_unix_socket: "/var/run/mysqld/mysqld.sock"
-        config_file: "/var/lib/mysql/.my.cnf"
+      when:
+        - item.clone is defined
 
   handlers:
-    - name: stop background mysql
-      shell: >
-        mysqladmin
-        -u root
-        --password={{ _root_password | quote }}
-        -S /var/run/mysqld/mysqld.sock shutdown
-        -w
-        --shutdown-timeout=30
-      no_log: "{{ flightdeck_debug | default(false) | ternary(false, true) }}"
+    - name: delete temp items
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - "{{ _cmd_temp_dir.path }}"
