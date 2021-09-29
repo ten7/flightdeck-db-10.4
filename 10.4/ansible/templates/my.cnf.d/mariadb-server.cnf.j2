@@ -39,7 +39,8 @@ server_id={{ flightdeck_db.serverId }}
 {% elif (flightdeck_db.serverIdFromHostname | default(true)) %}
 server_id={{ ((lookup('env', 'HOSTNAME') | regex_findall('\-[0-9]+')) | default(['-0'], true) | last | regex_replace('\-+', '') | int) + 1 }}
 {% endif %}
-{% if (flightdeck_db.binaryLogging is defined) and (flightdeck_db.binaryLogging.enabled | default('true') | bool) %}
+{% if (flightdeck_db.binaryLogging is defined) %}
+log-bin={{ flightdeck_db.binaryLogging.enabled | default(false) | bool | ternary('ON', 'OFF') }}
 log-basename={{ flightdeck_db.binaryLogging.baseName | default('mysqldb') }}
 binlog-format={{ flightdeck_db.binaryLogging.format | default('mixed') }}
 {% endif %}
