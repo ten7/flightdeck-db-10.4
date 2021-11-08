@@ -17,6 +17,7 @@ COPY ansible /ansible
 
 # Run the build.
 RUN ansible-galaxy install -fr /ansible/requirements.yml && \
+    ansible-galaxy collection install community.mysql && \
     ansible-playbook -i /ansible/inventories/all.ini /ansible/build.yml
 
 # Configure the runtime environment of the container.

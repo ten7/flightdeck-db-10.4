@@ -9,6 +9,28 @@
       notify:
         - delete temp items
 
+    - name: Get a list of database table counts
+      community.mysql.mysql_query:
+        query: >
+          select table_schema, count(*) as table_count
+            from tables
+           where table_type = %s
+             and table_schema in %s
+        positional_args:
+          - "BASE TABLE"
+          - "{{ mysql_databases | map(attribute='name') | list | default([]) }}"
+        login_db: "information_schema"
+        login_user: "root"
+        login_unix_socket: "/var/run/mysqld/mysqld.sock"
+        config_file: "/var/lib/mysql/.my.cnf"
+      register: _table_counts
+
+    - name: Reduce that list to only populated databases
+      set_fact:
+        _populated_dbs: "{{ _table_counts | json_query(_query) | list }}"
+      vars:
+        _query: "query_result[0][?table_count > `0`].table_schema"
+
     - name: Download DB dumps from S3
       aws_s3:
         bucket: "{{ item.clone.bucket }}"
@@ -36,6 +58,7 @@
       when:
         - item.clone is defined
         - (item.clone.method | default('none')) == 's3'
+        - item.name not in _populated_dbs
 
     - name: Import DB dumps
       shell: >
@@ -59,6 +82,7 @@
       no_log: "{{ flightdeck_debug | default(false) | ternary(false, true) }}"
       when:
         - item.clone is defined
+        - item.name not in _populated_dbs
 
   handlers:
     - name: delete temp items

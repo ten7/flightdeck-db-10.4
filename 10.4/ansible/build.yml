@@ -14,6 +14,7 @@
         - "py3-chardet"
         - "py3-mysqlclient"
         - "py3-urllib3"
+        - "py3-jmespath"
         - "mariadb"
         - "mariadb-client"
       notify:
